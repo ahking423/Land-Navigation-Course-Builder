@@ -291,7 +291,7 @@ this only affects `landnav_gui.py`, not the CLI.
 
 ## License
 
-Add your license of choice here (e.g. MIT, Apache-2.0).
+MIT License
 
 ## Contributing
 
