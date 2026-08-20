@@ -60,7 +60,7 @@ pip install -r requirements.txt
 `requirements.txt`:
 
 ```
-mgrs
+geodesy
 reportlab
 contextily
 matplotlib
