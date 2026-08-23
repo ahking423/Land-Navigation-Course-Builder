@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import csv
+import io
 import math
 import random
 import sys
@@ -31,6 +32,7 @@ from dataclasses import dataclass
 from pygeodesy.mgrs import parseMGRS
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 
@@ -54,6 +56,23 @@ class Point:
 # CSV / MGRS loading
 # ---------------------------------------------------------------------------
 
+def _read_csv_text(csv_path: str) -> str:
+    """Read the CSV's raw bytes and decode with the first encoding that
+    works. Plain 'utf-8' isn't safe to assume: CSVs saved from Excel on
+    Windows commonly use cp1252 (e.g. smart quotes, accented characters
+    in a point name), which raises UnicodeDecodeError under strict utf-8.
+    latin-1 never raises (it maps every byte 0-255), so it's a safe final
+    fallback that guarantees this always succeeds."""
+    with open(csv_path, "rb") as f:
+        raw = f.read()
+    for enc in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError(f"Could not decode {csv_path} as utf-8, cp1252, or latin-1.")
+
+
 def load_points(csv_path: str) -> list[Point]:
     """Load points from CSV and convert MGRS -> lat/lon.
 
@@ -62,27 +81,27 @@ def load_points(csv_path: str) -> list[Point]:
     fragile to bundle correctly with PyInstaller across platforms.
     """
     points = []
-    with open(csv_path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        # normalize header names (case/space insensitive)
-        fieldmap = {k.strip().lower(): k for k in reader.fieldnames or []}
-        name_key = fieldmap.get("pointname") or fieldmap.get("point name") or fieldmap.get("name")
-        mgrs_key = fieldmap.get("mgrs") or fieldmap.get("grid") or fieldmap.get("mgrs location")
-        if not name_key or not mgrs_key:
-            raise ValueError(
-                f"CSV must have 'PointName' and 'MGRS' columns. Found: {reader.fieldnames}"
-            )
-        for row in reader:
-            name = row[name_key].strip()
-            grid = row[mgrs_key].strip().replace(" ", "")
-            if not name or not grid:
-                continue
-            try:
-                ll = parseMGRS(grid).toLatLon()
-                lat, lon = ll.lat, ll.lon
-            except Exception as e:
-                raise ValueError(f"Bad MGRS grid '{grid}' for point '{name}': {e}")
-            points.append(Point(name=name, mgrs=grid, lat=lat, lon=lon))
+    text = _read_csv_text(csv_path)
+    reader = csv.DictReader(io.StringIO(text))
+    # normalize header names (case/space insensitive)
+    fieldmap = {k.strip().lower(): k for k in reader.fieldnames or []}
+    name_key = fieldmap.get("pointname") or fieldmap.get("point name") or fieldmap.get("name")
+    mgrs_key = fieldmap.get("mgrs") or fieldmap.get("grid") or fieldmap.get("mgrs location")
+    if not name_key or not mgrs_key:
+        raise ValueError(
+            f"CSV must have 'PointName' and 'MGRS' columns. Found: {reader.fieldnames}"
+        )
+    for row in reader:
+        name = row[name_key].strip()
+        grid = row[mgrs_key].strip().replace(" ", "")
+        if not name or not grid:
+            continue
+        try:
+            ll = parseMGRS(grid).toLatLon()
+            lat, lon = ll.lat, ll.lon
+        except Exception as e:
+            raise ValueError(f"Bad MGRS grid '{grid}' for point '{name}': {e}")
+        points.append(Point(name=name, mgrs=grid, lat=lat, lon=lon))
     if not points:
         raise ValueError("No points loaded from CSV.")
     return points
@@ -205,9 +224,10 @@ def generate_courses(
 # PDF output
 # ---------------------------------------------------------------------------
 
-def write_pdf(courses: list[Course], out_path: str, map_images: dict[int, str] | None = None) -> None:
-    """map_images: optional {course_num: png_path} to insert as an extra
-    full-page satellite overview right after that course's table page."""
+def write_pdf(courses: list[Course], out_path: str, map_images: dict[int, "io.BytesIO"] | None = None) -> None:
+    """map_images: optional {course_num: in-memory PNG buffer} to insert as
+    an extra full-page satellite overview at the end of the PDF. Nothing is
+    read from or written to disk for the maps — buffers only."""
     c = canvas.Canvas(out_path, pagesize=letter)
     page_w, page_h = letter
 
@@ -297,14 +317,15 @@ def write_pdf(courses: list[Course], out_path: str, map_images: dict[int, str] |
     # All course maps go at the end of the document, in the same course order.
     if map_images:
         for course in courses:
-            map_path = map_images.get(course.course_num)
-            if not map_path:
+            buf = map_images.get(course.course_num)
+            if not buf:
                 continue
             img_margin = 0.5 * inch
             avail_w = page_w - 2 * img_margin
             avail_h = page_h - 2 * img_margin
+            buf.seek(0)
             c.drawImage(
-                map_path, img_margin, img_margin, width=avail_w, height=avail_h,
+                ImageReader(buf), img_margin, img_margin, width=avail_w, height=avail_h,
                 preserveAspectRatio=True, anchor="c",
             )
             c.showPage()
@@ -326,9 +347,10 @@ def main():
     ap.add_argument("--min-distance", type=float, default=100.0, help="Min distance (m) between any two points in a course")
     ap.add_argument("--max-leg-distance", type=float, default=None, help="Optional max distance (m) between consecutive points in the route")
     ap.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
-    ap.add_argument("--static-maps-dir", default=None,
-                     help="If set, generate a satellite map PNG per course in this folder "
-                          "and embed each as an extra page in the PDF (needs internet)")
+    ap.add_argument("--include-course-maps", action="store_true",
+                     help="Append a satellite map page per course to the end of the PDF "
+                          "(needs internet). Maps are generated in memory only — no image "
+                          "files are written to disk.")
     ap.add_argument("--interactive-map", default=None,
                      help="If set, also write a single interactive HTML map (all courses, "
                           "toggleable layers) to this path (tiles load in-browser, needs internet)")
@@ -349,16 +371,13 @@ def main():
     )
 
     map_images = None
-    if args.static_maps_dir:
-        import os
+    if args.include_course_maps:
         from map_generator import draw_static_course_map
-        os.makedirs(args.static_maps_dir, exist_ok=True)
+        tile_cache = {}  # shared across courses so overlapping tiles fetch once
         map_images = {}
         for course in courses:
-            png_path = os.path.join(args.static_maps_dir, f"course_{course.course_num}.png")
-            draw_static_course_map(course, png_path)
-            map_images[course.course_num] = png_path
-            print(f"  map: course {course.course_num} -> {png_path}")
+            map_images[course.course_num] = draw_static_course_map(course, tile_cache=tile_cache)
+            print(f"  map generated for course {course.course_num}")
 
     if args.interactive_map:
         from map_generator import draw_interactive_map
