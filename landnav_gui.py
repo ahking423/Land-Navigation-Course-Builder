@@ -23,8 +23,8 @@ class LandNavApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Land Nav Course Generator")
-        self.geometry("620x660")
-        self.minsize(560, 520)
+        self.geometry("620x560")
+        self.minsize(750, 800)
 
         self.csv_path = tk.StringVar()
         self.out_path = tk.StringVar(value=os.path.join(os.getcwd(), "courses.pdf"))
@@ -276,14 +276,11 @@ class LandNavApp(tk.Tk):
             if map_opts["static"]:
                 self._safe_log("Fetching satellite imagery for course maps (needs internet)...")
                 from map_generator import draw_static_course_map
-                maps_dir = os.path.join(os.path.dirname(os.path.abspath(out_path)) or ".", "course_maps")
-                os.makedirs(maps_dir, exist_ok=True)
+                tile_cache = {}  # shared across courses so overlapping tiles fetch once
                 map_images = {}
                 for course in courses:
-                    png_path = os.path.join(maps_dir, f"course_{course.course_num}.png")
-                    draw_static_course_map(course, png_path)
-                    map_images[course.course_num] = png_path
-                    self._safe_log(f"  map for course {course.course_num} -> {png_path}")
+                    map_images[course.course_num] = draw_static_course_map(course, tile_cache=tile_cache)
+                    self._safe_log(f"  map generated for course {course.course_num}")
 
             if map_opts["interactive"]:
                 self._safe_log("Building interactive HTML map...")
